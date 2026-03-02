@@ -71,17 +71,6 @@ export default function InboxPage() {
     }
   };
 
-  const handlePin = async (id: number, pinned: boolean) => {
-    try {
-      await api.pinRecommendation(id, pinned);
-      setRecs((prev) =>
-        prev.map((r) => (r.id === id ? { ...r, pinned } : r))
-      );
-    } catch {
-      /* noop */
-    }
-  };
-
   const txnMap = useMemo(() => {
     const map = new Map<number, Transaction>();
     for (const t of transactions) map.set(t.id, t);
@@ -101,12 +90,9 @@ export default function InboxPage() {
           r.type.toLowerCase().includes(q)
       );
     }
-    // pinned first, then by date
-    return [...list].sort((a, b) => {
-      if (a.pinned && !b.pinned) return -1;
-      if (!a.pinned && b.pinned) return 1;
-      return new Date(b.created_at).getTime() - new Date(a.created_at).getTime();
-    });
+    return [...list].sort((a, b) =>
+      new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
+    );
   }, [recs, filterTab, search]);
 
   const selected = filteredRecs.find((r) => r.id === selectedId) ?? null;
@@ -242,7 +228,6 @@ export default function InboxPage() {
                           rec={r}
                           isSelected={r.id === selectedId}
                           onSelect={() => setSelectedId(r.id)}
-                          onPin={(pinned) => handlePin(r.id, pinned)}
                         />
                       ))}
                     </div>
@@ -260,7 +245,6 @@ export default function InboxPage() {
                 txnMap={txnMap}
                 onAccept={handleAccept}
                 onReject={handleReject}
-                onPin={handlePin}
               />
             ) : (
               <div className="flex h-full flex-col items-center justify-center gap-2 text-neutral-400">
@@ -283,12 +267,10 @@ function InboxRow({
   rec,
   isSelected,
   onSelect,
-  onPin,
 }: {
   rec: Recommendation;
   isSelected: boolean;
   onSelect: () => void;
-  onPin: (pinned: boolean) => void;
 }) {
   const isPending = rec.status === "pending";
   const typeIcon = (type: string) => {
@@ -328,23 +310,7 @@ function InboxRow({
       }`}
       onClick={onSelect}
     >
-      {/* pin button */}
-      <button
-        onClick={(e) => {
-          e.stopPropagation();
-          onPin(!rec.pinned);
-        }}
-        className={`absolute right-3 top-3 text-xs transition-opacity ${
-          rec.pinned
-            ? "opacity-100 text-amber-500"
-            : "opacity-0 group-hover:opacity-100 text-neutral-300 hover:text-amber-500"
-        }`}
-        title={rec.pinned ? "Unpin" : "Pin"}
-      >
-        📌
-      </button>
-
-      <div className="flex items-start justify-between gap-2 pr-6">
+      <div className="flex items-start justify-between gap-2">
         <div className="flex items-center gap-2 min-w-0">
           <span className="text-base shrink-0">{typeIcon(rec.type)}</span>
           <span
@@ -384,9 +350,6 @@ function InboxRow({
             {rec.status}
           </span>
         )}
-        {rec.pinned && (
-          <span className="text-[0.6rem] text-amber-500">📌 Pinned</span>
-        )}
       </div>
     </div>
   );
@@ -399,13 +362,11 @@ function RecommendationDetail({
   txnMap,
   onAccept,
   onReject,
-  onPin,
 }: {
   rec: Recommendation;
   txnMap: Map<number, Transaction>;
   onAccept: (id: number) => void;
   onReject: (id: number) => void;
-  onPin: (id: number, pinned: boolean) => void;
 }) {
   const [activeTab, setActiveTab] = useState<"details" | "chat">("details");
   const [feedbackModal, setFeedbackModal] = useState<"accept" | "reject" | null>(null);
@@ -438,16 +399,9 @@ function RecommendationDetail({
               <span className="shrink-0 rounded-full bg-slate-100 px-2.5 py-0.5 text-[0.65rem] font-medium text-neutral-600 capitalize">
                 {rec.type}
               </span>
-              <button
-                onClick={() => onPin(rec.id, !rec.pinned)}
-                className={`shrink-0 text-sm ${rec.pinned ? "text-amber-500" : "text-neutral-300 hover:text-amber-500"}`}
-                title={rec.pinned ? "Unpin" : "Pin"}
-              >
-                📌
-              </button>
             </div>
             <p className="text-xs text-neutral-400">
-              {rec.created_at} · {rec.confidence} confidence
+              {(rec.created_at || "").slice(0, 10)} · {rec.confidence} confidence
               {ad.goal_affected && (
                 <>
                   {" · Affects "}

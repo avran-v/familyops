@@ -136,6 +136,11 @@ export default function DashboardPage() {
                 role={activeRole}
                 item={selectedItem}
                 onClose={() => setSelectedItem(null)}
+                onUpdate={async () => {
+                  const [txns] = await Promise.all([api.getTransactions(), loadData()]);
+                  const fresh = txns.find((t: Transaction) => t.id === selectedItem.id);
+                  if (fresh) setSelectedItem(fresh);
+                }}
               />
             )}
           </div>
@@ -161,6 +166,7 @@ export function TopBar(props: {
     { href: "/", label: "Home" },
     { href: "/inbox", label: "Inbox" },
     { href: "/goals", label: "Wiki" },
+    { href: "/playground", label: "Playground" },
   ];
 
   return (
@@ -314,7 +320,7 @@ function TimelineTable(props: {
 
   const Row = ({ item }: { item: Transaction }) => (
     <tr key={item.id} className="cursor-pointer border-t border-slate-100 hover:bg-sky-50/40 transition-colors" onClick={() => onSelect(item)}>
-      <td className="px-4 py-2 text-xs text-neutral-500">{item.date}</td>
+      <td className="px-4 py-2 text-xs text-neutral-500">{fmtDate(item.date)}</td>
       <td className="px-4 py-2">
         <span className="text-sm font-medium">{categoryEmoji(item.category)} {item.description}</span>
         <span className="ml-2 rounded-full bg-sky-100 px-2 py-0.5 text-[0.65rem] text-sky-700">{item.category || "Other"}</span>
@@ -369,7 +375,7 @@ function TimelineTable(props: {
                       ))}
                     </div>
                   )}
-                  <p className="text-[0.65rem] text-neutral-400">{proposal.date || "No date"}</p>
+                  <p className="text-[0.65rem] text-neutral-400">{proposal.date ? fmtDate(proposal.date) : "No date"}</p>
                 </div>
                 <div className="flex shrink-0 gap-2">
                   <button
@@ -428,8 +434,95 @@ function TimelineTable(props: {
 
 /* ─── right drawer ─── */
 
-function RightDrawer(props: { role: Role; item: Transaction; onClose: () => void }) {
-  const { role, item, onClose } = props;
+function RightDrawer(props: { role: Role; item: Transaction; onClose: () => void; onUpdate: () => void }) {
+  const { item, onClose, onUpdate } = props;
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState({ description: item.description, amount: String(item.amount), owner: item.owner, category: item.category ?? "", date: fmtDate(item.date), tags: item.tags.join(", ") });
+  const [saving, setSaving] = useState(false);
+  const [history, setHistory] = useState<Array<{ id: number; snapshot: Transaction; edited_by: string; created_at: string }>>([]);
+  const [showHistory, setShowHistory] = useState(false);
+  const [explainResult, setExplainResult] = useState<string | null>(null);
+  const [explainLoading, setExplainLoading] = useState(false);
+  const [flagging, setFlagging] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+
+  useEffect(() => {
+    setDraft({ description: item.description, amount: String(item.amount), owner: item.owner, category: item.category ?? "", date: fmtDate(item.date), tags: item.tags.join(", ") });
+    setEditing(false);
+    setExplainResult(null);
+  }, [item.id, item.description, item.amount, item.owner, item.category, item.date, item.tags]);
+
+  const handleSave = async () => {
+    setSaving(true);
+    try {
+      await api.updateTransaction(item.id, {
+        description: draft.description,
+        amount: parseFloat(draft.amount),
+        owner: draft.owner,
+        category: draft.category || null,
+        date: draft.date,
+        tags: draft.tags.split(",").map((t) => t.trim()).filter(Boolean),
+      });
+      setEditing(false);
+      onUpdate();
+    } catch { /* noop */ }
+    setSaving(false);
+  };
+
+  const loadHistory = async () => {
+    try {
+      const h = await api.getTransactionHistory(item.id);
+      setHistory(h);
+    } catch { /* noop */ }
+    setShowHistory(true);
+  };
+
+  const handleRevert = async (editId: number) => {
+    try {
+      await api.revertTransaction(item.id, editId);
+      onUpdate();
+      loadHistory();
+    } catch { /* noop */ }
+  };
+
+  const handleExplain = async () => {
+    setExplainLoading(true);
+    try {
+      const res = await api.explainTransaction(item.id);
+      const reasoning = (res.ai_reasoning as string) || "";
+      const similar = (res.similar_transactions as Array<{ description: string; amount: number }>) || [];
+      let text = reasoning || "No AI reasoning stored for this transaction.";
+      if (similar.length > 0) {
+        text += "\n\nSimilar transactions: " + similar.map((s) => `${s.description} ($${s.amount})`).join(", ");
+      }
+      setExplainResult(text);
+    } catch {
+      setExplainResult("Could not explain. Make sure the backend is running.");
+    }
+    setExplainLoading(false);
+  };
+
+  const handleFlag = async () => {
+    setFlagging(true);
+    try {
+      await api.flagTransaction(item.id);
+      onUpdate();
+    } catch { /* noop */ }
+    setFlagging(false);
+  };
+
+  const handleDelete = async () => {
+    setDeleting(true);
+    try {
+      await api.deleteTransaction(item.id);
+      onClose();
+      onUpdate();
+    } catch { /* noop */ }
+    setDeleting(false);
+    setConfirmDelete(false);
+  };
+
   return (
     <aside className="w-[360px] shrink-0">
       <div className="rounded-xl border border-slate-200 bg-white h-full flex flex-col">
@@ -438,43 +531,106 @@ function RightDrawer(props: { role: Role; item: Transaction; onClose: () => void
             <span className="text-xs uppercase tracking-wide text-neutral-500">Transaction detail</span>
             <p className="text-sm font-semibold">{item.description}</p>
           </div>
-          <button onClick={onClose} className="rounded-full border border-slate-200 px-2 py-0.5 text-xs text-neutral-500 hover:bg-slate-50">Close</button>
+          <div className="flex items-center gap-1.5">
+            {!editing && (
+              <button onClick={() => setEditing(true)} className="rounded-full border border-slate-200 px-2 py-0.5 text-xs text-sky-600 hover:bg-sky-50">Edit</button>
+            )}
+            <button onClick={onClose} className="rounded-full border border-slate-200 px-2 py-0.5 text-xs text-neutral-500 hover:bg-slate-50">Close</button>
+          </div>
         </div>
         <div className="flex-1 space-y-4 overflow-auto px-4 py-3 text-sm">
-          <section>
-            <h3 className="mb-1 text-xs font-semibold uppercase tracking-wide text-neutral-500">Details</h3>
-            <div className="space-y-1 text-xs">
-              <DetailRow label="Date" value={item.date} />
-              <DetailRow label="Amount" value={`$${item.amount.toFixed(2)}`} />
-              <DetailRow label="Owner" value={item.owner} />
-              <DetailRow label="Category" value={item.category ?? "—"} />
-              <DetailRow label="Tags" value={item.tags.join(", ") || "—"} />
-              <DetailRow label="AI confidence" value={item.ai_confidence != null ? `${(item.ai_confidence * 100).toFixed(0)}%` : "—"} />
-            </div>
-          </section>
-          {item.ai_reasoning && (
+          {editing ? (
+            <section className="space-y-2">
+              <h3 className="mb-1 text-xs font-semibold uppercase tracking-wide text-sky-600">Editing</h3>
+              <EditField label="Description" value={draft.description} onChange={(v) => setDraft((d) => ({ ...d, description: v }))} />
+              <EditField label="Amount ($)" value={draft.amount} onChange={(v) => setDraft((d) => ({ ...d, amount: v }))} />
+              <EditField label="Owner" value={draft.owner} onChange={(v) => setDraft((d) => ({ ...d, owner: v }))} />
+              <EditField label="Category" value={draft.category} onChange={(v) => setDraft((d) => ({ ...d, category: v }))} />
+              <EditField label="Date" value={draft.date} onChange={(v) => setDraft((d) => ({ ...d, date: v }))} type="date" />
+              <EditField label="Tags (comma-separated)" value={draft.tags} onChange={(v) => setDraft((d) => ({ ...d, tags: v }))} />
+              <div className="flex gap-2 pt-1">
+                <button onClick={handleSave} disabled={saving} className="rounded-lg bg-neutral-900 px-3 py-1.5 text-xs font-medium text-white disabled:opacity-50">{saving ? "Saving..." : "Save"}</button>
+                <button onClick={() => setEditing(false)} className="rounded-lg border border-slate-200 px-3 py-1.5 text-xs text-neutral-600">Cancel</button>
+              </div>
+            </section>
+          ) : (
+            <section>
+              <h3 className="mb-1 text-xs font-semibold uppercase tracking-wide text-neutral-500">Details</h3>
+              <div className="space-y-1 text-xs">
+                <DetailRow label="Date" value={fmtDate(item.date)} />
+                <DetailRow label="Amount" value={`$${item.amount.toFixed(2)}`} />
+                <DetailRow label="Owner" value={item.owner} />
+                <DetailRow label="Category" value={item.category ?? "—"} />
+                <DetailRow label="Tags" value={item.tags.join(", ") || "—"} />
+              </div>
+            </section>
+          )}
+
+          {item.ai_reasoning && !editing && (
             <section>
               <h3 className="mb-1 text-xs font-semibold uppercase tracking-wide text-neutral-500">AI reasoning</h3>
               <p className="text-xs text-neutral-700">{item.ai_reasoning}</p>
             </section>
           )}
-          <section>
-            <h3 className="mb-1 text-xs font-semibold uppercase tracking-wide text-neutral-500">Agent panel</h3>
-            <div className="grid gap-2">
-              <AgentCard name="ClassifierAgent" summary={`Categorized as ${item.category ?? "unknown"} with ${((item.ai_confidence ?? 0) * 100).toFixed(0)}% confidence.`} />
-              <AgentCard name="AnomalyDetector" summary="Checks for unusual merchants, amounts, or patterns." />
-              <AgentCard name="GoalAdvisor" summary="Evaluates impact on family goals and suggests reallocation." />
-              <AgentCard name="ScenarioPlanner" summary={`What would happen if ${role === "child" ? "we skip" : "you skip"} this next month?`} />
-            </div>
-          </section>
-          <section>
-            <h3 className="mb-1 text-xs font-semibold uppercase tracking-wide text-neutral-500">Actions</h3>
-            <div className="flex flex-wrap gap-2">
-              <button className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-1.5 text-xs font-medium hover:bg-slate-100">Explain</button>
-              <button className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-1.5 text-xs font-medium hover:bg-slate-100">Flag</button>
-              <button className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-1.5 text-xs font-medium hover:bg-slate-100">Create rule</button>
-            </div>
-          </section>
+
+          {!editing && (
+            <section>
+              <h3 className="mb-1 text-xs font-semibold uppercase tracking-wide text-neutral-500">Actions</h3>
+              <div className="flex flex-wrap gap-2">
+                <button onClick={handleExplain} disabled={explainLoading} className="rounded-lg border border-sky-200 bg-sky-50 px-3 py-1.5 text-xs font-medium text-sky-700 hover:bg-sky-100 disabled:opacity-50">
+                  {explainLoading ? "Loading..." : "💡 Explain"}
+                </button>
+                <button onClick={handleFlag} disabled={flagging || item.tags.includes("flagged")} className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-1.5 text-xs font-medium text-amber-700 hover:bg-amber-100 disabled:opacity-50">
+                  {item.tags.includes("flagged") ? "🚩 Flagged" : "🚩 Flag"}
+                </button>
+                <button onClick={loadHistory} className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-1.5 text-xs font-medium text-neutral-600 hover:bg-slate-100">
+                  🕑 History
+                </button>
+                {!confirmDelete ? (
+                  <button onClick={() => setConfirmDelete(true)} className="rounded-lg border border-rose-200 bg-rose-50 px-3 py-1.5 text-xs font-medium text-rose-600 hover:bg-rose-100">
+                    🗑 Delete
+                  </button>
+                ) : (
+                  <div className="flex items-center gap-1">
+                    <button onClick={handleDelete} disabled={deleting} className="rounded-lg bg-rose-600 px-3 py-1.5 text-xs font-medium text-white disabled:opacity-50">
+                      {deleting ? "..." : "Confirm"}
+                    </button>
+                    <button onClick={() => setConfirmDelete(false)} className="rounded-lg border border-slate-200 px-2 py-1.5 text-xs text-neutral-500">
+                      No
+                    </button>
+                  </div>
+                )}
+              </div>
+            </section>
+          )}
+
+          {explainResult && !editing && (
+            <section className="rounded-xl border border-sky-100 bg-sky-50/60 p-3">
+              <h3 className="text-xs font-semibold uppercase tracking-wide text-sky-800 mb-1">Explanation</h3>
+              <p className="text-xs text-neutral-700 leading-relaxed">{explainResult}</p>
+            </section>
+          )}
+
+          {showHistory && !editing && (
+            <section>
+              <h3 className="mb-2 text-xs font-semibold uppercase tracking-wide text-neutral-500">Edit history ({history.length})</h3>
+              {history.length === 0 ? (
+                <p className="text-xs text-neutral-400">No edits yet.</p>
+              ) : (
+                <div className="space-y-2">
+                  {history.map((h) => (
+                    <div key={h.id} className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-xs">
+                      <div className="flex items-center justify-between mb-1">
+                        <span className="text-neutral-400">{fmtDate(h.created_at)} · {h.edited_by}</span>
+                        <button onClick={() => handleRevert(h.id)} className="rounded-full border border-slate-200 bg-white px-2 py-0.5 text-[0.6rem] text-sky-600 hover:bg-sky-50">Revert</button>
+                      </div>
+                      <p className="text-neutral-700">{h.snapshot.description} · ${Number(h.snapshot.amount).toFixed(2)} · {h.snapshot.owner}</p>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </section>
+          )}
         </div>
       </div>
     </aside>
@@ -483,20 +639,25 @@ function RightDrawer(props: { role: Role; item: Transaction; onClose: () => void
 
 /* ─── small helpers ─── */
 
+function fmtDate(dateStr: string): string {
+  if (!dateStr) return "—";
+  return dateStr.slice(0, 10);
+}
+
+function EditField({ label, value, onChange, type = "text" }: { label: string; value: string; onChange: (v: string) => void; type?: string }) {
+  return (
+    <div>
+      <label className="text-[0.65rem] font-medium text-neutral-500 uppercase tracking-wide">{label}</label>
+      <input type={type} value={value} onChange={(e) => onChange(e.target.value)} className="mt-0.5 w-full rounded-lg border border-slate-200 bg-slate-50 px-2 py-1.5 text-xs outline-none focus:border-neutral-400" />
+    </div>
+  );
+}
+
 function DetailRow({ label, value }: { label: string; value: string }) {
   return (
     <div className="flex justify-between gap-4">
       <span className="text-neutral-500">{label}</span>
       <span className="text-neutral-900">{value}</span>
-    </div>
-  );
-}
-
-function AgentCard({ name, summary }: { name: string; summary: string }) {
-  return (
-    <div className="rounded-lg border border-slate-200 bg-indigo-50/50 px-3 py-2 text-xs">
-      <span className="font-semibold">{name}</span>
-      <p className="text-neutral-600">{summary}</p>
     </div>
   );
 }

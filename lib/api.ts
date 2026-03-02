@@ -90,6 +90,19 @@ export type ChatMessage = {
   created_at: string;
 };
 
+export type PlaygroundChart = {
+  type: "bar" | "line" | "pie" | "area";
+  title: string;
+  data: Array<Record<string, unknown>>;
+  colors?: string[];
+  yKeys?: string[];
+};
+
+export type PlaygroundResponse = {
+  text: string;
+  chart?: PlaygroundChart | null;
+};
+
 export type CommandResult = {
   intent: string;
   parameters: Record<string, unknown>;
@@ -208,8 +221,35 @@ export const api = {
       body: JSON.stringify({ text }),
     }),
 
+  updateTransaction: (id: number, updates: Partial<Pick<Transaction, "amount" | "description" | "category" | "tags" | "owner" | "date">>) =>
+    request<{ ok: boolean; transaction: Transaction }>(`/transactions/${id}`, {
+      method: "PATCH",
+      body: JSON.stringify(updates),
+    }),
+
+  getTransactionHistory: (id: number) =>
+    request<Array<{ id: number; txn_id: number; snapshot: Transaction; edited_by: string; created_at: string }>>(`/transactions/${id}/history`),
+
+  revertTransaction: (txnId: number, editId: number) =>
+    request<{ ok: boolean; transaction: Transaction }>(`/transactions/${txnId}/revert/${editId}`, { method: "POST" }),
+
+  flagTransaction: (id: number) =>
+    request<{ ok: boolean; tags: string[] }>(`/transactions/${id}/flag`, { method: "POST" }),
+
+  deleteTransaction: (id: number) =>
+    request<{ ok: boolean }>(`/transactions/${id}`, { method: "DELETE" }),
+
   explainTransaction: (id: number) =>
     request<Record<string, unknown>>(`/transactions/${id}/explain`),
+
+  playgroundChat: (message: string, history: Array<{ role: string; content: string }> = []) =>
+    request<PlaygroundResponse>("/playground/chat", {
+      method: "POST",
+      body: JSON.stringify({ message, history }),
+    }),
+
+  playgroundSuggestions: () =>
+    request<{ suggestions: string[] }>("/playground/suggestions"),
 
   search: (q: string, type?: string) =>
     request<unknown[]>(`/search?q=${encodeURIComponent(q)}${type ? `&type=${type}` : ""}`),

@@ -97,6 +97,15 @@ def init_db():
             value       TEXT NOT NULL,
             updated_at  TEXT DEFAULT (datetime('now'))
         );
+
+        CREATE TABLE IF NOT EXISTS transaction_edit_history (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            txn_id      INTEGER NOT NULL,
+            snapshot    TEXT NOT NULL,
+            edited_by   TEXT DEFAULT 'admin',
+            created_at  TEXT DEFAULT (datetime('now')),
+            FOREIGN KEY (txn_id) REFERENCES transactions(id)
+        );
     """)
     # Light migrations for existing local DBs.
     existing_cols = {
@@ -154,15 +163,122 @@ def get_transaction_by_id(txn_id: int) -> Optional[dict]:
     return _row_to_txn(row) if row else None
 
 
-def update_transaction(txn_id: int, updates: dict):
+def update_transaction(txn_id: int, updates: dict, save_history: bool = True):
     if not updates:
         return
     conn = get_conn()
-    sets = ", ".join(f"{k} = ?" for k in updates)
-    vals = list(updates.values()) + [txn_id]
+    if save_history:
+        row = conn.execute("SELECT * FROM transactions WHERE id = ?", (txn_id,)).fetchone()
+        if row:
+            snapshot = dict(row)
+            snapshot["tags"] = json.loads(snapshot.get("tags") or "[]")
+            conn.execute(
+                "INSERT INTO transaction_edit_history (txn_id, snapshot) VALUES (?, ?)",
+                (txn_id, json.dumps(snapshot)),
+            )
+    safe = dict(updates)
+    if "tags" in safe and isinstance(safe["tags"], list):
+        safe["tags"] = json.dumps(safe["tags"])
+    sets = ", ".join(f"{k} = ?" for k in safe)
+    vals = list(safe.values()) + [txn_id]
     conn.execute(f"UPDATE transactions SET {sets} WHERE id = ?", vals)
     conn.commit()
     conn.close()
+
+
+def get_transaction_edit_history(txn_id: int) -> list[dict]:
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT * FROM transaction_edit_history WHERE txn_id = ? ORDER BY created_at DESC",
+        (txn_id,),
+    ).fetchall()
+    conn.close()
+    results = []
+    for r in rows:
+        d = dict(r)
+        d["snapshot"] = json.loads(d.get("snapshot") or "{}")
+        results.append(d)
+    return results
+
+
+def revert_transaction(txn_id: int, edit_id: int) -> bool:
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT snapshot FROM transaction_edit_history WHERE id = ? AND txn_id = ?",
+        (edit_id, txn_id),
+    ).fetchone()
+    if not row:
+        conn.close()
+        return False
+    snapshot = json.loads(row["snapshot"])
+    current = conn.execute("SELECT * FROM transactions WHERE id = ?", (txn_id,)).fetchone()
+    if current:
+        cur_snap = dict(current)
+        cur_snap["tags"] = json.loads(cur_snap.get("tags") or "[]")
+        conn.execute(
+            "INSERT INTO transaction_edit_history (txn_id, snapshot, edited_by) VALUES (?, ?, ?)",
+            (txn_id, json.dumps(cur_snap), "revert"),
+        )
+    fields = ["amount", "description", "category", "tags", "owner", "date"]
+    for f in fields:
+        if f in snapshot:
+            val = json.dumps(snapshot[f]) if f == "tags" and isinstance(snapshot[f], list) else snapshot[f]
+            conn.execute(f"UPDATE transactions SET {f} = ? WHERE id = ?", (val, txn_id))
+    conn.commit()
+    conn.close()
+    return True
+
+
+def delete_transaction(txn_id: int) -> bool:
+    conn = get_conn()
+    row = conn.execute("SELECT * FROM transactions WHERE id = ?", (txn_id,)).fetchone()
+    if not row:
+        conn.close()
+        return False
+    conn.execute("DELETE FROM transactions WHERE id = ?", (txn_id,))
+    conn.execute("DELETE FROM transaction_edit_history WHERE txn_id = ?", (txn_id,))
+    conn.commit()
+    conn.close()
+    return True
+
+
+def get_transaction_stats() -> dict:
+    """Aggregate stats for the playground AI to use."""
+    conn = get_conn()
+    rows = conn.execute("SELECT * FROM transactions ORDER BY date DESC").fetchall()
+    conn.close()
+    txns = [_row_to_txn(r) for r in rows]
+
+    if not txns:
+        return {"count": 0, "total": 0, "by_category": {}, "by_owner": {}, "by_month": {}, "transactions": []}
+
+    by_category: dict[str, float] = {}
+    by_owner: dict[str, float] = {}
+    by_month: dict[str, float] = {}
+    by_tag: dict[str, float] = {}
+    total = 0.0
+
+    for t in txns:
+        amt = t["amount"]
+        total += amt
+        cat = t.get("category") or "Uncategorized"
+        by_category[cat] = by_category.get(cat, 0) + amt
+        by_owner[t["owner"]] = by_owner.get(t["owner"], 0) + amt
+        month_key = (t.get("date") or "")[:7]
+        if month_key:
+            by_month[month_key] = by_month.get(month_key, 0) + amt
+        for tag in t.get("tags", []):
+            by_tag[tag] = by_tag.get(tag, 0) + amt
+
+    return {
+        "count": len(txns),
+        "total": round(total, 2),
+        "by_category": {k: round(v, 2) for k, v in sorted(by_category.items(), key=lambda x: -x[1])},
+        "by_owner": {k: round(v, 2) for k, v in sorted(by_owner.items(), key=lambda x: -x[1])},
+        "by_month": {k: round(v, 2) for k, v in sorted(by_month.items())},
+        "by_tag": {k: round(v, 2) for k, v in sorted(by_tag.items(), key=lambda x: -x[1])},
+        "transactions": txns[:100],
+    }
 
 
 def _row_to_txn(row) -> dict:
