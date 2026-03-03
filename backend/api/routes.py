@@ -1,4 +1,5 @@
 from fastapi import APIRouter, Request, HTTPException
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from ..models.schemas import Transaction, Goal, CommandRequest
 from ..db import database as db
@@ -355,6 +356,315 @@ async def process_command(cmd: CommandRequest, request: Request):
     orchestrator = request.app.state.orchestrator
     result = await orchestrator.process_nl_command(cmd.text)
     return result
+
+
+# ---- dashboard (generative UI) ----
+
+
+@router.get("/dashboard/state")
+async def get_dashboard_state():
+    state = db.get_dashboard_state()
+    if not state:
+        return {"html": None, "chat_history": []}
+    return {"html": state["html_content"], "chat_history": state["chat_history"]}
+
+
+class DashboardPlanRequest(BaseModel):
+    message: str = ""
+
+
+@router.post("/dashboard/plan")
+async def dashboard_plan(body: DashboardPlanRequest, request: Request):
+    """Step 1: AI proposes a list of widgets based on the household data."""
+    import json as _json
+    orchestrator = request.app.state.orchestrator
+    stats = db.get_transaction_stats()
+    goals = db.get_goals()
+    recs = db.get_recommendations()
+
+    by_cat = ", ".join(f"{k}: ${v:,.2f}" for k, v in list(stats.get("by_category", {}).items())[:8])
+    by_owner = ", ".join(f"{k}: ${v:,.2f}" for k, v in stats.get("by_owner", {}).items())
+    by_month = ", ".join(f"{k}: ${v:,.2f}" for k, v in list(stats.get("by_month", {}).items())[-6:])
+
+    goal_text = ", ".join(f"{g['icon']} {g['name']} (${g['current_amount']:,.0f}/${g['target_amount']:,.0f})" for g in goals) or "None"
+    rec_text = ", ".join(f"{r['title']}" for r in recs[:5]) or "None"
+
+    user_msg = body.message.strip() or "Suggest a balanced default overview for the whole household."
+
+    prompt = f"""You are a financial dashboard planner for a family finance app.
+
+HOUSEHOLD DATA:
+- {stats['count']} transactions totaling ${stats['total']:,.2f}
+- Categories: {by_cat}
+- Owners: {by_owner}
+- Monthly spending: {by_month}
+- Goals: {goal_text}
+- AI Recommendations: {rec_text}
+
+USER REQUEST: "{user_msg}"
+
+Based on this data, propose 3-5 dashboard widgets that would be most useful for the entire household, not just a single bill or tiny slice of data.
+Start from a general overview: overall spending, category breakdowns, trends over time, goal progress, and comparisons between family members. Only then add any deeper dives if they clearly help the whole family.
+The user may also request novel/custom widgets like a "GitHub-style no-spend streak tracker", "daily spending heatmap", "family leaderboard", etc. — support any creative idea they describe, but keep the perspective household-wide.
+
+For each widget, provide:
+- id: a short snake_case identifier
+- title: display title with an emoji
+- description: one sentence explaining what it shows and why it's useful
+- type: one of "stat_card", "donut_chart", "bar_chart", "line_chart", "progress_bars", "table", "alert_card", "heatmap", "streak_tracker", "custom"
+
+Return ONLY a JSON array. No markdown fences, no explanation:
+[{{"id": "...", "title": "...", "description": "...", "type": "..."}}]"""
+
+    response = orchestrator.client.chat.completions.create(
+        model="gpt-4o",
+        max_tokens=1000,
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0.5,
+    )
+    raw = response.choices[0].message.content.strip()
+    if raw.startswith("```"):
+        raw = raw.split("\n", 1)[1].rsplit("```", 1)[0].strip()
+
+    try:
+        widgets = _json.loads(raw)
+    except Exception:
+        widgets = [
+            {"id": "total_spend", "title": "💰 Total Spending", "description": "Summary stat cards with total, average, and transaction count.", "type": "stat_card"},
+            {"id": "category_breakdown", "title": "📊 Spending by Category", "description": "Donut chart showing how spending breaks down by category.", "type": "donut_chart"},
+            {"id": "monthly_trend", "title": "📈 Monthly Trend", "description": "Line chart showing spending over recent months.", "type": "line_chart"},
+            {"id": "goal_progress", "title": "🎯 Goal Progress", "description": "Progress bars for each family savings goal.", "type": "progress_bars"},
+            {"id": "owner_comparison", "title": "👥 By Family Member", "description": "Bar chart comparing spending across family members.", "type": "bar_chart"},
+        ]
+
+    return {"widgets": widgets}
+
+
+@router.get("/dashboard/suggestions")
+async def dashboard_suggestions(request: Request):
+    """Generate dynamic prompt suggestions based on current data."""
+    import json as _json
+    orchestrator = request.app.state.orchestrator
+    stats = db.get_transaction_stats()
+    goals = db.get_goals()
+
+    if stats["count"] == 0:
+        return {"suggestions": [
+            "Build me an overview of our finances",
+            "Show spending trends and goal progress",
+        ]}
+
+    prompt = f"""Based on this household's financial data, generate exactly 4 SHORT suggested dashboard prompts a user could request.
+Data: {stats['count']} transactions totaling ${stats['total']:,.2f}. Categories: {', '.join(list(stats.get('by_category', {}).keys())[:6])}. Owners: {', '.join(stats.get('by_owner', {}).keys())}. {len(goals)} goals.
+
+Rules:
+- Each 5-10 words. Be specific to THIS household's data (reference actual categories, owners, goals by name).
+- Mix: overviews, deep-dives, comparisons, creative ideas (streak trackers, heatmaps, leaderboards).
+- Return ONLY a JSON array of strings. No markdown."""
+
+    response = orchestrator.client.chat.completions.create(
+        model="gpt-4o-mini",
+        max_tokens=300,
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0.8,
+    )
+    raw = response.choices[0].message.content.strip()
+    try:
+        if raw.startswith("```"):
+            raw = raw.split("\n", 1)[1].rsplit("```", 1)[0].strip()
+        suggestions = _json.loads(raw)
+    except Exception:
+        suggestions = [
+            "Build me an overview of our finances",
+            "Show spending trends and goal progress",
+            "Compare spending across family members",
+            "Highlight where we can save money",
+        ]
+    return {"suggestions": suggestions}
+
+
+@router.delete("/dashboard/state")
+async def clear_dashboard():
+    """Clear the persisted dashboard."""
+    db.save_dashboard_state("", [])
+    return {"ok": True}
+
+
+class DashboardBuildRequest(BaseModel):
+    widgets: list[dict]
+    message: str = ""
+
+
+@router.post("/dashboard/build")
+async def dashboard_build(body: DashboardBuildRequest, request: Request):
+    """Step 2: Stream-generate HTML for approved widgets via SSE."""
+    import json as _json, time as _time, logging
+    _log = logging.getLogger("dashboard")
+
+    orchestrator = request.app.state.orchestrator
+    stats = db.get_transaction_stats()
+    goals = db.get_goals()
+
+    by_tag_dict = stats.get("by_tag", {}) or {}
+
+    data_json = _json.dumps({
+        "transactions": stats.get("transactions", [])[:30],
+        "goals": goals,
+        "stats": {
+            "count": stats["count"],
+            "total": stats["total"],
+            "by_category": stats.get("by_category", {}),
+            "by_owner": stats.get("by_owner", {}),
+            "by_month": stats.get("by_month", {}),
+            "by_tag": by_tag_dict,
+        },
+    }, default=str)
+
+    widget_list = "\n".join(
+        f"  {i+1}. [{w['type']}] {w['title']}: {w['description']}"
+        for i, w in enumerate(body.widgets)
+    )
+
+    system_prompt = f"""You build a compact financial dashboard as a single HTML page rendered in an iframe.
+
+WIDGETS TO BUILD (only these, no extras):
+{widget_list}
+
+Return ONLY raw HTML starting with <!DOCTYPE html>. NEVER wrap in markdown fences.
+Put <style> in <head>, body content next, <script> at END of body.
+
+MANDATORY JS CONTRACT (at END of <body>):
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+<script>
+window.DATA = {data_json};
+var chartInstances = {{}};
+window.refresh = function() {{ renderDashboard(); }};
+window.addEventListener("message", function(e) {{
+  if (e.data && e.data.type === "DATA_UPDATE") {{ window.DATA = e.data.payload; window.refresh(); }}
+}});
+function renderDashboard() {{
+  Object.values(chartInstances).forEach(function(c) {{ c.destroy(); }});
+  chartInstances = {{}};
+  // rebuild all from window.DATA
+}}
+document.addEventListener("DOMContentLoaded", renderDashboard);
+</script>
+
+─── DESIGN SYSTEM (match the parent app exactly) ───
+Font: font-family: 'Nunito', system-ui, -apple-system, sans-serif;
+Page: background: transparent; margin:0; padding:12px; box-sizing:border-box;
+Cards: background:#fff; border:1px solid #e2e8f0; border-radius:12px; padding:16px 20px;
+Layout: CSS grid with grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap:16px;
+Sizing: Do NOT cap total height. Do NOT use overflow:hidden on body/html. Allow the dashboard to grow naturally.
+Body: min-height: 100%; overflow: visible.
+
+Text sizes (follow exactly):
+- Section title: 13px, font-weight:600, color:#737373, text-transform:uppercase, letter-spacing:0.05em
+- Card title: 13px, font-weight:600, color:#262626
+- Large values: 22px, font-weight:700, color:#4338ca (indigo-700)
+- Small labels: 11px, color:#a3a3a3
+- Body text: 13px, color:#525252
+
+Colors (use these exact values):
+- Emerald: #10b981 (primary positive)
+- Sky: #3b82f6 (info/links)
+- Amber: #f59e0b (warning)
+- Rose: #ef4444 (negative/alert)
+- Violet: #8b5cf6 (accent)
+- Indigo: #4338ca (monetary values)
+- Borders: #e2e8f0
+- Subtle bg: #f8fafc
+- Muted text: #a3a3a3
+
+Pills/tags: display:inline-flex; border-radius:9999px; padding:2px 10px; font-size:11px; font-weight:500;
+  Category pills: background:#e0f2fe; color:#0369a1;
+  Owner pills: background:#ede9fe; color:#6d28d9;
+  Tag pills: background:#d1fae5; color:#047857;
+
+Progress bars: height:6px; border-radius:9999px; background:#e2e8f0;
+  Fill: background: linear-gradient(to right, #10b981, #38bdf8); border-radius:9999px;
+
+Charts (Chart.js 4 config):
+- font.size:11, font.family:'Nunito, system-ui'
+- No chart title (plugins.title.display=false)
+- Grid: color '#f1f5f9', drawBorder:false
+- Legend: position:'bottom', labels.font.size:10, labels.boxWidth:8, labels.padding:8
+- responsive:true
+- interaction: mode:'index', intersect:false
+- Tooltips: enabled:true with callbacks to format $ values; tooltip title fontSize 12 weight 600; body fontSize 12; backgroundColor 'rgba(0,0,0,0.8)'; padding 10; cornerRadius 8
+- Doughnut: cutout:'65%', spacing:2, borderWidth:0
+- Doughnut: hoverOffset: 8
+- Bar: borderRadius:4, borderSkipped:false, barPercentage:0.75
+- Line: tension:0.35, borderWidth:2, pointRadius:3, pointHoverRadius:6, pointBackgroundColor '#ffffff', pointBorderWidth 2, fill:true with alpha 0.1
+- Interactivity: set canvas cursor to pointer on hover; enable animations duration 600 easing 'easeOutQuart'
+- Animation: animation.duration=600, animation.easing='easeOutQuart'
+- Hover: onHover set cursor='pointer' when active elements exist
+- Aspect ratio: use maintainAspectRatio:false and a fixed-height container so charts fill the space. (Fallback: aspectRatio: 1.8)
+
+Stat cards: aim for ~56px height (don’t hard-code). Use a flex row, align-items:center, gap:8px.
+Chart containers: height:200px, padding:12px, background:#f8fafc, border-radius:8px, position:relative. The <canvas> must be display:block; width:100%; height:100%.
+
+Hover effects on cards: transition: transform 0.15s, box-shadow 0.15s;
+  :hover {{ transform:translateY(-1px); box-shadow:0 2px 8px rgba(0,0,0,0.06); }}
+
+For creative/custom widgets (streak trackers, heatmaps, leaderboards, etc.), implement with pure HTML/CSS/JS using the same design system. CSS grids for heatmaps, styled divs for streaks, progress bars for leaderboards."""
+
+    # Encourage a playful but appropriate visual style without breaking consistency
+    system_prompt += """
+
+VISUAL TONE:
+- The dashboard should feel friendly and approachable, like the rest of FamilyOps: rounded cards, soft shadows, generous padding.
+- Use fun but appropriate colors within the palette above (no neon). It should feel warm and family-friendly, not corporate or sterile.
+- Use emojis and small icons in card titles where it helps readability and delight."""
+
+    user_content = body.message.strip() or "Build the dashboard with the approved widgets."
+
+    _log.info("🔨 Streaming dashboard build with %d widgets...", len(body.widgets))
+    t0 = _time.time()
+
+    def generate():
+        full = ""
+        try:
+            stream = orchestrator.client.chat.completions.create(
+                model="gpt-5-nano",
+                max_completion_tokens=16000,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_content},
+                ],
+                stream=True,
+            )
+            for chunk in stream:
+                delta = chunk.choices[0].delta.content or ""
+                if delta:
+                    full += delta
+                    yield f"data: {_json.dumps({'t': delta})}\n\n"
+        except Exception as exc:
+            _log.error("Stream error: %s", exc)
+            yield f"data: {_json.dumps({'error': str(exc)})}\n\n"
+            return
+
+        elapsed = _time.time() - t0
+        _log.info("✅ Stream done in %.1fs (%d chars)", elapsed, len(full))
+
+        raw = full.strip()
+        if raw.startswith("```"):
+            first_nl = raw.find("\n")
+            if first_nl != -1:
+                raw = raw[first_nl + 1:]
+            if raw.endswith("```"):
+                raw = raw[:-3].rstrip()
+        if not raw.startswith("<!"):
+            idx = raw.find("<!DOCTYPE")
+            if idx == -1:
+                idx = raw.find("<html")
+            if idx != -1:
+                raw = raw[idx:]
+
+        db.save_dashboard_state(raw, [])
+        yield f"data: {_json.dumps({'done': True})}\n\n"
+
+    return StreamingResponse(generate(), media_type="text/event-stream")
 
 
 # ---- playground ----

@@ -106,6 +106,13 @@ def init_db():
             created_at  TEXT DEFAULT (datetime('now')),
             FOREIGN KEY (txn_id) REFERENCES transactions(id)
         );
+
+        CREATE TABLE IF NOT EXISTS dashboard_state (
+            id           INTEGER PRIMARY KEY CHECK (id = 1),
+            html_content TEXT NOT NULL DEFAULT '',
+            chat_history TEXT NOT NULL DEFAULT '[]',
+            updated_at   TEXT DEFAULT (datetime('now'))
+        );
     """)
     # Light migrations for existing local DBs.
     existing_cols = {
@@ -566,6 +573,30 @@ def delete_preference(key: str):
 def delete_feedback(feedback_id: int):
     conn = get_conn()
     conn.execute("DELETE FROM recommendation_feedback WHERE id = ?", (feedback_id,))
+    conn.commit()
+    conn.close()
+
+
+def get_dashboard_state() -> dict | None:
+    conn = get_conn()
+    row = conn.execute("SELECT * FROM dashboard_state WHERE id = 1").fetchone()
+    conn.close()
+    if not row:
+        return None
+    d = dict(row)
+    d["chat_history"] = json.loads(d.get("chat_history") or "[]")
+    return d
+
+
+def save_dashboard_state(html: str, chat_history: list):
+    conn = get_conn()
+    conn.execute(
+        "INSERT INTO dashboard_state (id, html_content, chat_history, updated_at) "
+        "VALUES (1, ?, ?, datetime('now')) "
+        "ON CONFLICT(id) DO UPDATE SET html_content = excluded.html_content, "
+        "chat_history = excluded.chat_history, updated_at = excluded.updated_at",
+        (html, json.dumps(chat_history)),
+    )
     conn.commit()
     conn.close()
 

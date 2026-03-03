@@ -1,9 +1,9 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { api, type Transaction, type Goal, type TransactionProposal } from "@/lib/api";
+import { api, API_BASE, type Transaction, type Goal, type TransactionProposal, type DashboardWidgetProposal } from "@/lib/api";
 
 type Role = "parent" | "teen" | "child";
 type TimelineViewMode = "list" | "byTag" | "byOwner";
@@ -27,6 +27,12 @@ export default function DashboardPage() {
   const [goals, setGoals] = useState<Goal[]>([]);
   const [pendingProposals, setPendingProposals] = useState<TransactionProposal[]>([]);
 
+  const [dashboardHtml, setDashboardHtml] = useState<string | null>(null);
+  const [chatOpen, setChatOpen] = useState(false);
+  const [dashboardLoaded, setDashboardLoaded] = useState(false);
+  const [dashboardIframeHeight, setDashboardIframeHeight] = useState<string>("480px");
+  const iframeRef = useRef<HTMLIFrameElement>(null);
+
   const loadData = useCallback(async () => {
     try {
       const [txns, g, proposals] = await Promise.all([
@@ -49,9 +55,43 @@ export default function DashboardPage() {
     return () => window.removeEventListener("familyops:proposal-created", onProposalCreated);
   }, [loadData]);
 
+  useEffect(() => {
+    api.getDashboardState().then((state) => {
+      if (state?.html) setDashboardHtml(state.html);
+      setDashboardLoaded(true);
+    }).catch(() => setDashboardLoaded(true));
+  }, []);
+
+  const pushDataToIframe = useCallback(() => {
+    if (!iframeRef.current?.contentWindow || !dashboardHtml) return;
+    const payload = {
+      transactions: transactions.slice(0, 100),
+      goals,
+      stats: computeStats(transactions),
+    };
+    iframeRef.current.contentWindow.postMessage({ type: "DATA_UPDATE", payload }, "*");
+  }, [transactions, goals, dashboardHtml]);
+
+  const resizeIframeToContent = useCallback(() => {
+    if (!iframeRef.current) return;
+    try {
+      const body = iframeRef.current.contentDocument?.body;
+      if (!body) return;
+      const h = body.scrollHeight;
+      if (h && Number.isFinite(h)) setDashboardIframeHeight(`${Math.min(1200, h + 16)}px`);
+    } catch {
+      /* ignore (sandbox restrictions / not ready yet) */
+    }
+  }, []);
+
+  useEffect(() => {
+    pushDataToIframe();
+  }, [pushDataToIframe]);
+
   const handleRunSweep = async () => {
     setIsSweepLoading(true);
     try { await api.runAISweep(); } catch { /* noop */ }
+    await loadData();
     setIsSweepLoading(false);
   };
 
@@ -104,6 +144,14 @@ export default function DashboardPage() {
     }
   };
 
+  const handleDashboardBuilt = useCallback((html: string) => {
+    setDashboardHtml(html);
+  }, []);
+
+  const handleDashboardCleared = useCallback(() => {
+    setDashboardHtml(null);
+  }, []);
+
   return (
     <div className="min-h-screen">
       <TopBar
@@ -117,6 +165,22 @@ export default function DashboardPage() {
       <div className="mx-auto flex min-h-[calc(100vh-4rem)] max-w-6xl flex-col">
         <main className="flex flex-1 flex-col px-8 pb-8 pt-4 space-y-4">
           <GoalsStrip goals={activeGoals} />
+
+          {dashboardLoaded && (
+            <DashboardSection
+              html={dashboardHtml}
+              iframeRef={iframeRef}
+              onIframeLoad={() => {
+                pushDataToIframe();
+                resizeIframeToContent();
+                window.setTimeout(resizeIframeToContent, 50);
+                window.setTimeout(resizeIframeToContent, 250);
+              }}
+              height={dashboardIframeHeight}
+              onOpenChat={() => setChatOpen(true)}
+            />
+          )}
+
           <div className="flex flex-1 gap-4">
             <div className={selectedItem ? "flex-1" : "w-full"}>
               <TimelineTable
@@ -146,6 +210,582 @@ export default function DashboardPage() {
           </div>
         </main>
       </div>
+
+      <AgentChatPanel
+        open={chatOpen}
+        onClose={() => setChatOpen(false)}
+        onDashboardBuilt={handleDashboardBuilt}
+        onDashboardCleared={handleDashboardCleared}
+        hasHtml={!!dashboardHtml}
+      />
+
+      {!chatOpen && (
+        <button
+          onClick={() => setChatOpen(true)}
+          className="fixed bottom-6 right-6 z-40 flex h-14 w-14 items-center justify-center rounded-full bg-gradient-to-br from-emerald-500 to-sky-500 text-xl text-white shadow-lg hover:shadow-xl hover:scale-105 transition-all"
+          title="Chat with AI Agent"
+        >
+          🤖
+        </button>
+      )}
+    </div>
+  );
+}
+
+/* ─── compute stats helper (mirrors backend) ─── */
+
+function computeStats(transactions: Transaction[]) {
+  const byCategory: Record<string, number> = {};
+  const byOwner: Record<string, number> = {};
+  const byMonth: Record<string, number> = {};
+  const byTag: Record<string, number> = {};
+  let total = 0;
+  for (const t of transactions) {
+    total += t.amount;
+    const cat = t.category || "Uncategorized";
+    byCategory[cat] = (byCategory[cat] || 0) + t.amount;
+    byOwner[t.owner] = (byOwner[t.owner] || 0) + t.amount;
+    const month = (t.date || "").slice(0, 7);
+    if (month) byMonth[month] = (byMonth[month] || 0) + t.amount;
+    for (const tag of t.tags || []) byTag[tag] = (byTag[tag] || 0) + t.amount;
+  }
+  return {
+    count: transactions.length,
+    total: Math.round(total * 100) / 100,
+    by_category: byCategory,
+    by_owner: byOwner,
+    by_month: byMonth,
+    by_tag: byTag,
+  };
+}
+
+/* ─── dashboard section (iframe + empty state) ─── */
+
+function DashboardSection({ html, iframeRef, onIframeLoad, onOpenChat, height }: {
+  html: string | null;
+  iframeRef: React.RefObject<HTMLIFrameElement | null>;
+  onIframeLoad: () => void;
+  onOpenChat: () => void;
+  height: string;
+}) {
+  if (!html) {
+    return (
+      <section
+        className="rounded-xl border-2 border-dashed border-slate-200 bg-gradient-to-br from-slate-50 to-sky-50/30 px-8 py-10 text-center cursor-pointer hover:border-sky-300 transition-colors"
+        onClick={onOpenChat}
+      >
+        <div className="text-3xl mb-3">🤖</div>
+        <h3 className="text-base font-semibold text-neutral-800 mb-1">Your AI Dashboard</h3>
+        <p className="text-sm text-neutral-500 max-w-md mx-auto">
+          Chat with your AI agent to build a personalized dashboard. It will create charts, tables, and insights from your financial data.
+        </p>
+        <button className="mt-4 inline-flex items-center gap-2 rounded-lg bg-neutral-900 px-4 py-2 text-sm font-medium text-white hover:bg-neutral-800">
+          Start building
+        </button>
+      </section>
+    );
+  }
+
+  return (
+    <section className="rounded-xl border border-slate-200 bg-white overflow-hidden relative group">
+      <div className="absolute top-2 right-2 z-10 opacity-0 group-hover:opacity-100 transition-opacity">
+        <button
+          onClick={onOpenChat}
+          className="rounded-lg bg-white/90 border border-slate-200 px-3 py-1.5 text-xs font-medium text-neutral-700 shadow-sm hover:bg-slate-50 backdrop-blur"
+        >
+          🤖 Edit Dashboard
+        </button>
+      </div>
+      <iframe
+        ref={iframeRef}
+        srcDoc={html}
+        sandbox="allow-scripts allow-same-origin"
+        className="w-full border-0"
+        style={{ height }}
+        onLoad={onIframeLoad}
+        title="AI Dashboard"
+      />
+    </section>
+  );
+}
+
+/* ─── agent chat panel (plan → approve → build) ─── */
+
+type PanelStep = "prompt" | "planning" | "review" | "building" | "done";
+
+function AgentChatPanel({ open, onClose, onDashboardBuilt, onDashboardCleared, hasHtml }: {
+  open: boolean;
+  onClose: () => void;
+  onDashboardBuilt: (html: string) => void;
+  onDashboardCleared: () => void;
+  hasHtml: boolean;
+}) {
+  const [step, setStep] = useState<PanelStep>("prompt");
+  const [input, setInput] = useState("");
+  const [proposals, setProposals] = useState<(DashboardWidgetProposal & { enabled: boolean })[]>([]);
+  const [buildError, setBuildError] = useState<string | null>(null);
+  const [elapsed, setElapsed] = useState(0);
+  const [customWidgetInput, setCustomWidgetInput] = useState("");
+  const [showClearConfirm, setShowClearConfirm] = useState(false);
+  const [suggestions, setSuggestions] = useState<string[]>([]);
+  const [suggestionsLoading, setSuggestionsLoading] = useState(false);
+  const [streamPhase, setStreamPhase] = useState<"styles" | "widgets" | "scripts" | "idle">("idle");
+  const [streamChars, setStreamChars] = useState(0);
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    if (open && step === "prompt") setTimeout(() => inputRef.current?.focus(), 100);
+  }, [open, step]);
+
+  useEffect(() => {
+    if (step !== "building" && step !== "planning") { setElapsed(0); return; }
+    setElapsed(0);
+    const t = setInterval(() => setElapsed((e) => e + 1), 1000);
+    return () => clearInterval(t);
+  }, [step]);
+
+  useEffect(() => {
+    if (!open || suggestions.length > 0) return;
+    setSuggestionsLoading(true);
+    api.dashboardSuggestions().then((r) => setSuggestions(r.suggestions)).catch(() => {
+      setSuggestions(["Build me an overview of our finances", "Show spending trends and goal progress"]);
+    }).finally(() => setSuggestionsLoading(false));
+  }, [open, suggestions.length]);
+
+  const handlePlan = async (text?: string) => {
+    const msg = (text || input).trim();
+    setInput("");
+    setStep("planning");
+    setBuildError(null);
+    try {
+      const res = await api.dashboardPlan(msg);
+      setProposals(res.widgets.map((w) => ({ ...w, enabled: true })));
+      setStep("review");
+    } catch {
+      setStep("prompt");
+      setBuildError("Failed to generate plan. Try again.");
+    }
+  };
+
+  const handleBuild = async () => {
+    const approved = proposals.filter((w) => w.enabled);
+    if (approved.length === 0) return;
+    setStep("building");
+    setBuildError(null);
+    setStreamChars(0);
+    setStreamPhase("styles");
+
+    try {
+      const res = await fetch(`${API_BASE}/dashboard/build`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ widgets: approved, message: "" }),
+      });
+
+      if (!res.ok || !res.body) throw new Error("Build failed");
+
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let html = "";
+      let buffer = "";
+      let finished = false;
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+
+        const lines = buffer.split("\n");
+        buffer = lines.pop() || "";
+
+        for (const line of lines) {
+          if (!line.startsWith("data: ")) continue;
+          try {
+            const evt = JSON.parse(line.slice(6));
+            if (evt.t) {
+              html += evt.t;
+              setStreamChars(html.length);
+              if (html.includes("<body")) setStreamPhase("widgets");
+              if (html.includes("<script")) setStreamPhase("scripts");
+            }
+            if (evt.done) {
+              finished = true;
+              onDashboardBuilt(html);
+              setStreamPhase("idle");
+              setStep("done");
+            }
+            if (evt.error) throw new Error(evt.error);
+          } catch (parseErr) {
+            if ((parseErr as Error).message?.includes("Build")) throw parseErr;
+          }
+        }
+      }
+
+      if (!finished && html) {
+        onDashboardBuilt(html);
+        setStreamPhase("idle");
+        setStep("done");
+      }
+    } catch {
+      setStreamPhase("idle");
+      setStep("review");
+      setBuildError("Failed to build dashboard. Try again.");
+    }
+  };
+
+  const handleReset = () => {
+    setStep("prompt");
+    setProposals([]);
+    setBuildError(null);
+    setCustomWidgetInput("");
+    setSuggestions([]);
+  };
+
+  const handleClear = async () => {
+    try {
+      await api.clearDashboard();
+      onDashboardCleared();
+      setShowClearConfirm(false);
+      handleReset();
+    } catch { /* ignore */ }
+  };
+
+  const handleAddCustomWidget = () => {
+    const text = customWidgetInput.trim();
+    if (!text) return;
+    const id = "custom_" + Date.now();
+    setProposals((prev) => [...prev, { id, title: text, description: "Custom widget requested by user", type: "custom", enabled: true }]);
+    setCustomWidgetInput("");
+  };
+
+  const toggleWidget = (id: string) => {
+    setProposals((prev) => prev.map((w) => w.id === id ? { ...w, enabled: !w.enabled } : w));
+  };
+
+  const removeWidget = (id: string) => {
+    setProposals((prev) => prev.filter((w) => w.id !== id));
+  };
+
+  const approvedCount = proposals.filter((w) => w.enabled).length;
+
+  return (
+    <div
+      className={`fixed inset-y-0 right-0 z-50 flex flex-col bg-white border-l border-slate-200 shadow-2xl transition-transform duration-300 ${
+        open ? "translate-x-0" : "translate-x-full"
+      }`}
+      style={{ width: "400px" }}
+    >
+      {/* header */}
+      <div className="flex items-center justify-between border-b border-slate-200 px-4 py-3">
+        <div className="flex items-center gap-2">
+          <div className="h-7 w-7 rounded-lg bg-gradient-to-br from-emerald-400 to-sky-500 flex items-center justify-center text-sm">🤖</div>
+          <div>
+            <h3 className="text-sm font-semibold text-neutral-800">Dashboard Agent</h3>
+            <p className="text-[0.65rem] text-neutral-400">
+              {step === "prompt" && "Tell me what you want to see"}
+              {step === "planning" && "Analyzing your data..."}
+              {step === "review" && "Review the plan below"}
+              {step === "building" && "Building your dashboard..."}
+              {step === "done" && "Dashboard ready!"}
+            </p>
+          </div>
+        </div>
+        <button onClick={onClose} className="rounded-full p-1 text-neutral-400 hover:bg-slate-100 hover:text-neutral-600">
+          <svg className="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
+        </button>
+      </div>
+
+      {/* body */}
+      <div className="flex-1 overflow-auto px-4 py-4">
+
+        {buildError && (
+          <div className="mb-3 rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-700">{buildError}</div>
+        )}
+
+        {/* clear confirmation overlay */}
+        {showClearConfirm && (
+          <div className="mb-4 rounded-xl border border-rose-200 bg-rose-50 p-4 space-y-3">
+            <p className="text-sm font-semibold text-rose-800">Clear dashboard?</p>
+            <p className="text-xs text-rose-600">This will remove your current AI dashboard permanently. You can always build a new one.</p>
+            <div className="flex gap-2">
+              <button onClick={handleClear} className="flex-1 rounded-lg bg-rose-600 px-3 py-2 text-xs font-medium text-white hover:bg-rose-700">
+                Yes, clear it
+              </button>
+              <button onClick={() => setShowClearConfirm(false)} className="flex-1 rounded-lg border border-slate-200 px-3 py-2 text-xs font-medium text-neutral-600 hover:bg-slate-50">
+                Cancel
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* step: prompt */}
+        {step === "prompt" && !showClearConfirm && (
+          <div className="space-y-4">
+            {hasHtml ? (
+              <>
+                <div className="text-center py-3">
+                  <div className="text-2xl mb-2">🎨</div>
+                  <p className="text-sm font-medium text-neutral-700 mb-1">Edit your dashboard</p>
+                  <p className="text-xs text-neutral-400">Choose an action below, or describe what you want to change.</p>
+                </div>
+
+                <div className="space-y-2">
+                  <button
+                    onClick={() => handlePlan("Redesign the entire dashboard with the best widgets for this household")}
+                    className="flex w-full items-center gap-3 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2.5 text-left text-xs text-neutral-700 hover:bg-sky-50 hover:border-sky-200 transition-colors"
+                  >
+                    <span className="text-base">🔄</span>
+                    <div>
+                      <p className="font-medium">Rebuild entirely</p>
+                      <p className="text-[0.6rem] text-neutral-400">Start fresh with new widget proposals</p>
+                    </div>
+                  </button>
+                  <button
+                    onClick={() => handlePlan("Suggest modifications and additions to improve the current dashboard")}
+                    className="flex w-full items-center gap-3 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2.5 text-left text-xs text-neutral-700 hover:bg-sky-50 hover:border-sky-200 transition-colors"
+                  >
+                    <span className="text-base">✏️</span>
+                    <div>
+                      <p className="font-medium">Edit widgets</p>
+                      <p className="text-[0.6rem] text-neutral-400">Swap, add, or remove specific widgets</p>
+                    </div>
+                  </button>
+                  <button
+                    onClick={() => setShowClearConfirm(true)}
+                    className="flex w-full items-center gap-3 rounded-lg border border-rose-100 bg-rose-50/50 px-3 py-2.5 text-left text-xs text-rose-600 hover:bg-rose-50 hover:border-rose-200 transition-colors"
+                  >
+                    <span className="text-base">🗑️</span>
+                    <div>
+                      <p className="font-medium">Clear dashboard</p>
+                      <p className="text-[0.6rem] text-rose-400">Remove the current dashboard entirely</p>
+                    </div>
+                  </button>
+                </div>
+
+                <div className="border-t border-slate-100 pt-3">
+                  <p className="text-[0.65rem] text-neutral-400 mb-2 font-medium uppercase tracking-wider">Or try something new</p>
+                  <div className="space-y-1.5">
+                    {suggestionsLoading ? (
+                      <p className="text-xs text-neutral-400 text-center py-2">Loading suggestions...</p>
+                    ) : suggestions.map((s) => (
+                      <button
+                        key={s}
+                        onClick={() => handlePlan(s)}
+                        className="flex w-full items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 py-2 text-left text-xs text-neutral-600 hover:bg-sky-50 hover:border-sky-200 transition-colors"
+                      >
+                        <span className="text-neutral-300">→</span> {s}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              </>
+            ) : (
+              <>
+                <div className="text-center py-4">
+                  <div className="text-2xl mb-2">✨</div>
+                  <p className="text-sm font-medium text-neutral-700 mb-1">Let&apos;s build your dashboard</p>
+                  <p className="text-xs text-neutral-400">
+                    Describe what you want, or pick a suggestion. The AI will propose widgets for your approval.
+                  </p>
+                </div>
+                <div className="space-y-2">
+                  <button
+                    onClick={() => handlePlan("Use a polished default household overview layout with general widgets for the whole family")}
+                    className="flex w-full items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 py-2.5 text-left text-xs text-neutral-700 hover:bg-sky-50 hover:border-sky-200 transition-colors"
+                  >
+                    <span className="text-sm">⭐</span>
+                    <span>
+                      <span className="font-medium">Try default overview</span>
+                      <span className="block text-[0.6rem] text-neutral-400">Balanced summary for the whole household</span>
+                    </span>
+                  </button>
+                  {suggestionsLoading ? (
+                    <p className="text-xs text-neutral-400 text-center py-2">Loading suggestions...</p>
+                  ) : suggestions.map((s) => (
+                    <button
+                      key={s}
+                      onClick={() => handlePlan(s)}
+                      className="flex w-full items-center gap-2 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2.5 text-left text-xs text-neutral-700 hover:bg-sky-50 hover:border-sky-200 transition-colors"
+                    >
+                      <span className="text-sm">→</span> {s}
+                    </button>
+                  ))}
+                </div>
+              </>
+            )}
+          </div>
+        )}
+
+        {/* step: planning (loading) */}
+        {step === "planning" && (
+          <div className="flex flex-col items-center justify-center py-16 gap-3">
+            <div className="flex items-center gap-1.5">
+              <div className="h-2.5 w-2.5 rounded-full bg-emerald-400 animate-bounce" style={{ animationDelay: "0ms" }} />
+              <div className="h-2.5 w-2.5 rounded-full bg-sky-400 animate-bounce" style={{ animationDelay: "150ms" }} />
+              <div className="h-2.5 w-2.5 rounded-full bg-violet-400 animate-bounce" style={{ animationDelay: "300ms" }} />
+            </div>
+            <p className="text-xs text-neutral-500">Analyzing your financial data...</p>
+            <p className="text-[0.6rem] text-neutral-400 tabular-nums">{elapsed}s</p>
+          </div>
+        )}
+
+        {/* step: review (checkboxes + custom widgets) */}
+        {step === "review" && (
+          <div className="space-y-4">
+            <div>
+              <p className="text-sm font-semibold text-neutral-800 mb-0.5">Proposed widgets</p>
+              <p className="text-xs text-neutral-400">Toggle off any you don&apos;t want. Add your own below.</p>
+            </div>
+            <div className="space-y-2">
+              {proposals.map((w) => (
+                <div
+                  key={w.id}
+                  className={`flex items-start gap-3 rounded-lg border px-3 py-2.5 transition-colors ${
+                    w.enabled
+                      ? "border-sky-200 bg-sky-50/50"
+                      : "border-slate-200 bg-slate-50/50 opacity-50"
+                  }`}
+                >
+                  <input
+                    type="checkbox"
+                    checked={w.enabled}
+                    onChange={() => toggleWidget(w.id)}
+                    className="mt-0.5 h-4 w-4 rounded border-slate-300 text-sky-600 focus:ring-sky-500 cursor-pointer"
+                  />
+                  <div className="min-w-0 flex-1">
+                    <p className="text-xs font-semibold text-neutral-800">{w.title}</p>
+                    <p className="text-[0.65rem] text-neutral-500 leading-relaxed">{w.description}</p>
+                    <span className="inline-block mt-1 rounded-full bg-white border border-slate-200 px-2 py-0.5 text-[0.6rem] text-neutral-400">{w.type.replace("_", " ")}</span>
+                  </div>
+                  {w.id.startsWith("custom_") && (
+                    <button onClick={() => removeWidget(w.id)} className="text-neutral-300 hover:text-rose-400 mt-0.5 text-xs">✕</button>
+                  )}
+                </div>
+              ))}
+            </div>
+
+            {/* add custom widget */}
+            <div className="border-t border-slate-100 pt-3">
+              <p className="text-[0.65rem] text-neutral-400 mb-2 font-medium uppercase tracking-wider">Add custom widget</p>
+              <form onSubmit={(e) => { e.preventDefault(); handleAddCustomWidget(); }} className="flex items-center gap-2">
+                <input
+                  type="text"
+                  value={customWidgetInput}
+                  onChange={(e) => setCustomWidgetInput(e.target.value)}
+                  placeholder="e.g. GitHub-style no-spend streak tracker"
+                  className="flex-1 rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs outline-none focus:border-sky-300 placeholder:text-neutral-300"
+                />
+                <button type="submit" disabled={!customWidgetInput.trim()} className="rounded-lg bg-sky-500 px-2.5 py-2 text-xs font-medium text-white disabled:opacity-40 hover:bg-sky-600">+</button>
+              </form>
+            </div>
+
+          </div>
+        )}
+
+        {/* step: building */}
+        {step === "building" && (() => {
+          const phases = [
+            { key: "styles", label: "Setting up styles", icon: "🎨" },
+            { key: "widgets", label: `Building ${approvedCount} widgets`, icon: "🧩" },
+            { key: "scripts", label: "Wiring up interactivity", icon: "⚡" },
+          ] as const;
+          const currentIdx = phases.findIndex((p) => p.key === streamPhase);
+          const pct = streamPhase === "styles" ? 15 : streamPhase === "widgets" ? 55 : 85;
+
+          return (
+            <div className="py-6 space-y-5">
+              <div className="text-center">
+                <p className="text-sm font-medium text-neutral-700 mb-1">Building your dashboard</p>
+                <p className="text-xs text-neutral-400 tabular-nums">{elapsed}s &middot; {(streamChars / 1000).toFixed(1)}k chars</p>
+              </div>
+
+              <div className="space-y-2">
+                {phases.map((p, i) => {
+                  const isDone = i < currentIdx;
+                  const isActive = i === currentIdx;
+                  return (
+                    <div key={p.key} className={`flex items-center gap-3 rounded-lg border px-3 py-2.5 transition-all ${isDone ? "border-emerald-200 bg-emerald-50/50" : isActive ? "border-sky-200 bg-sky-50/50" : "border-slate-100 bg-slate-50/30"}`}>
+                      {isDone ? (
+                        <span className="text-emerald-500 text-sm">✓</span>
+                      ) : isActive ? (
+                        <div className="h-4 w-4 rounded-full border-2 border-sky-200 border-t-sky-500 animate-spin" />
+                      ) : (
+                        <span className="text-sm opacity-40">{p.icon}</span>
+                      )}
+                      <span className={`text-xs ${isDone ? "text-emerald-700 font-medium" : isActive ? "text-sky-700 font-medium" : "text-neutral-400"}`}>{p.label}</span>
+                    </div>
+                  );
+                })}
+              </div>
+
+              <div className="rounded-lg bg-slate-50 border border-slate-100 p-3">
+                <div className="h-1.5 rounded-full bg-slate-200 overflow-hidden">
+                  <div className="h-full rounded-full bg-gradient-to-r from-sky-400 to-emerald-400 transition-all duration-700 ease-out" style={{ width: `${pct}%` }} />
+                </div>
+              </div>
+            </div>
+          );
+        })()}
+
+        {/* step: done */}
+        {step === "done" && (
+          <div className="flex flex-col items-center justify-center py-16 gap-3 text-center">
+            <div className="text-3xl">🎉</div>
+            <p className="text-sm font-semibold text-neutral-800">Dashboard built!</p>
+            <p className="text-xs text-neutral-500">Scroll up to see it. You can edit or rebuild anytime.</p>
+            <button
+              onClick={handleReset}
+              className="mt-2 rounded-lg border border-slate-200 bg-white px-4 py-2 text-xs font-medium text-neutral-700 hover:bg-slate-50"
+            >
+              Edit dashboard
+            </button>
+          </div>
+        )}
+      </div>
+
+      {/* footer */}
+      {step === "review" && (
+        <div className="border-t border-slate-200 px-4 py-3 space-y-2">
+          <button
+            onClick={handleBuild}
+            disabled={approvedCount === 0}
+            className="w-full rounded-lg bg-neutral-900 px-4 py-2.5 text-sm font-medium text-white disabled:opacity-40 hover:bg-neutral-800"
+          >
+            Build Dashboard ({approvedCount} widget{approvedCount !== 1 ? "s" : ""})
+          </button>
+          <button
+            onClick={handleReset}
+            className="w-full rounded-lg border border-slate-200 px-4 py-2 text-xs text-neutral-500 hover:bg-slate-50"
+          >
+            Start over
+          </button>
+        </div>
+      )}
+
+      {step === "prompt" && (
+        <div className="border-t border-slate-200 px-4 py-3">
+          <form
+            onSubmit={(e) => { e.preventDefault(); handlePlan(); }}
+            className="flex items-center gap-2"
+          >
+            <input
+              ref={inputRef}
+              type="text"
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              placeholder={hasHtml ? "Describe what to change..." : "Describe your ideal dashboard..."}
+              className="flex-1 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm outline-none focus:border-sky-300"
+            />
+            <button
+              type="submit"
+              disabled={!input.trim()}
+              className="rounded-lg bg-neutral-900 px-3 py-2 text-sm font-medium text-white disabled:opacity-40"
+            >
+              →
+            </button>
+          </form>
+        </div>
+      )}
     </div>
   );
 }
@@ -165,7 +805,6 @@ export function TopBar(props: {
   const navItems = [
     { href: "/", label: "Home" },
     { href: "/inbox", label: "Inbox" },
-    { href: "/goals", label: "Wiki" },
     { href: "/playground", label: "Playground" },
   ];
 
@@ -245,7 +884,7 @@ function GoalsStrip({ goals }: { goals: Goal[] }) {
           <h2 className="text-sm font-semibold uppercase tracking-wide text-neutral-500">Family goals</h2>
           <p className="text-base text-neutral-700">Every AI decision is measured against these first.</p>
         </div>
-        <Link href="/goals" className="text-xs text-neutral-500 hover:underline">View wiki →</Link>
+        <span className="text-xs text-neutral-400">🎯 Tracked by AI</span>
       </div>
       <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
         {goals.map((goal) => {

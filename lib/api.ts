@@ -1,4 +1,4 @@
-const API_BASE = "http://localhost:8000/api";
+export const API_BASE = "http://localhost:8000/api";
 
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
   const res = await fetch(`${API_BASE}${path}`, {
@@ -101,6 +101,26 @@ export type PlaygroundChart = {
 export type PlaygroundResponse = {
   text: string;
   chart?: PlaygroundChart | null;
+};
+
+export type DashboardState = {
+  html: string | null;
+  chat_history: { role: string; content: string }[];
+};
+
+export type DashboardWidgetProposal = {
+  id: string;
+  title: string;
+  description: string;
+  type: string;
+};
+
+export type DashboardPlanResponse = {
+  widgets: DashboardWidgetProposal[];
+};
+
+export type DashboardBuildResponse = {
+  html: string;
 };
 
 export type CommandResult = {
@@ -253,4 +273,25 @@ export const api = {
 
   search: (q: string, type?: string) =>
     request<unknown[]>(`/search?q=${encodeURIComponent(q)}${type ? `&type=${type}` : ""}`),
+
+  getDashboardState: () =>
+    request<DashboardState>("/dashboard/state"),
+
+  dashboardPlan: (message: string = "") =>
+    request<DashboardPlanResponse>("/dashboard/plan", {
+      method: "POST",
+      body: JSON.stringify({ message }),
+    }),
+
+  dashboardBuild: (widgets: DashboardWidgetProposal[], message: string = "") =>
+    request<DashboardBuildResponse>("/dashboard/build", {
+      method: "POST",
+      body: JSON.stringify({ widgets, message }),
+    }),
+
+  dashboardSuggestions: () =>
+    request<{ suggestions: string[] }>("/dashboard/suggestions"),
+
+  clearDashboard: () =>
+    request<{ ok: boolean }>("/dashboard/state", { method: "DELETE" }),
 };
