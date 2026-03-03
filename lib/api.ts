@@ -131,6 +131,26 @@ export type CommandResult = {
   data?: Record<string, unknown>;
 };
 
+export type CreateTransactionRequest = {
+  amount: number;
+  description: string;
+  owner: string;
+  date: string;
+  category?: string | null;
+  tags?: string[];
+};
+
+export type CreateGoalRequest = {
+  name: string;
+  icon?: string;
+  target_amount: number;
+  current_amount?: number;
+  deadline: string;
+  priority?: string;
+  status?: string;
+  summary?: string | null;
+};
+
 export const api = {
   getTransactions: (owner?: string) =>
     request<Transaction[]>(`/transactions${owner ? `?owner=${owner}` : ""}`),
@@ -159,6 +179,12 @@ export const api = {
 
   getGoals: (status?: string) =>
     request<Goal[]>(`/goals${status ? `?status=${status}` : ""}`),
+
+  createGoal: (goal: CreateGoalRequest) =>
+    request<{ id: number } & Goal>("/goals", {
+      method: "POST",
+      body: JSON.stringify(goal),
+    }),
 
   getRecommendations: (status?: string) =>
     request<Recommendation[]>(
@@ -245,6 +271,19 @@ export const api = {
     request<{ ok: boolean; transaction: Transaction }>(`/transactions/${id}`, {
       method: "PATCH",
       body: JSON.stringify(updates),
+    }),
+
+  createTransaction: (payload: CreateTransactionRequest) =>
+    request<{ transaction: Transaction; recommendations?: unknown[] }>("/transactions", {
+      method: "POST",
+      body: JSON.stringify({
+        amount: payload.amount,
+        description: payload.description,
+        owner: payload.owner,
+        date: payload.date,
+        category: payload.category ?? null,
+        tags: payload.tags ?? [],
+      }),
     }),
 
   getTransactionHistory: (id: number) =>

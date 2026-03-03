@@ -26,6 +26,7 @@ export default function DashboardPage() {
   const [transactions, setTransactions] = useState<Transaction[]>([]);
   const [goals, setGoals] = useState<Goal[]>([]);
   const [pendingProposals, setPendingProposals] = useState<TransactionProposal[]>([]);
+  const [goalsManagerOpen, setGoalsManagerOpen] = useState(false);
 
   const [dashboardHtml, setDashboardHtml] = useState<string | null>(null);
   const [chatOpen, setChatOpen] = useState(false);
@@ -164,7 +165,7 @@ export default function DashboardPage() {
       />
       <div className="mx-auto flex min-h-[calc(100vh-4rem)] max-w-6xl flex-col">
         <main className="flex flex-1 flex-col px-8 pb-8 pt-4 space-y-4">
-          <GoalsStrip goals={activeGoals} />
+          <GoalsStrip goals={activeGoals} onManage={() => setGoalsManagerOpen(true)} />
 
           {dashboardLoaded && (
             <DashboardSection
@@ -185,6 +186,7 @@ export default function DashboardPage() {
             <div className={selectedItem ? "flex-1" : "w-full"}>
               <TimelineTable
                 items={filteredTimeline}
+                allTransactions={transactions}
                 pendingProposals={pendingProposals}
                 viewMode={viewMode}
                 dateRange={dateRange}
@@ -193,6 +195,7 @@ export default function DashboardPage() {
                 onSelect={setSelectedItem}
                 onApproveProposal={handleApproveProposal}
                 onRejectProposal={handleRejectProposal}
+                onQuickAddTransaction={loadData}
               />
             </div>
             {selectedItem && (
@@ -218,16 +221,16 @@ export default function DashboardPage() {
         onDashboardCleared={handleDashboardCleared}
         hasHtml={!!dashboardHtml}
       />
+      <ManageGoalsDrawer
+        open={goalsManagerOpen}
+        goals={goals}
+        onClose={() => setGoalsManagerOpen(false)}
+        onSaved={async () => {
+          await loadData();
+          setGoalsManagerOpen(false);
+        }}
+      />
 
-      {!chatOpen && (
-        <button
-          onClick={() => setChatOpen(true)}
-          className="fixed bottom-6 right-6 z-40 flex h-14 w-14 items-center justify-center rounded-full bg-gradient-to-br from-emerald-500 to-sky-500 text-xl text-white shadow-lg hover:shadow-xl hover:scale-105 transition-all"
-          title="Chat with AI Agent"
-        >
-          🤖
-        </button>
-      )}
     </div>
   );
 }
@@ -875,40 +878,154 @@ export function TopBar(props: {
 
 /* ─── goals strip ─── */
 
-function GoalsStrip({ goals }: { goals: Goal[] }) {
-  if (!goals.length) return null;
+function GoalsStrip({ goals, onManage }: { goals: Goal[]; onManage: () => void }) {
   return (
     <section className="rounded-xl border border-slate-200 bg-white px-5 py-4 space-y-3">
       <div className="flex items-center justify-between">
         <div>
           <h2 className="text-sm font-semibold uppercase tracking-wide text-neutral-500">Family goals</h2>
-          <p className="text-base text-neutral-700">Every AI decision is measured against these first.</p>
+          <p className="text-base text-neutral-700">
+            {goals.length
+              ? "Every AI decision is measured against these first."
+              : "No goals yet. Add one so the AI can optimize for what matters."}
+          </p>
         </div>
-        <span className="text-xs text-neutral-400">🎯 Tracked by AI</span>
+        <div className="flex items-center gap-2">
+          <span className="text-xs text-neutral-400">🎯 Tracked by AI</span>
+          <button
+            onClick={onManage}
+            className="rounded-lg border border-slate-200 bg-white px-2.5 py-1 text-xs font-medium text-neutral-700 hover:bg-slate-50"
+          >
+            {goals.length ? "Edit goals" : "+ Add goal"}
+          </button>
+        </div>
       </div>
-      <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
-        {goals.map((goal) => {
-          const pct = goal.target_amount > 0
-            ? Math.min(100, Math.round((goal.current_amount / goal.target_amount) * 100))
-            : 0;
-          return (
-            <article key={goal.id} className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5 text-xs">
-              <div className="mb-1.5 flex items-center gap-2">
-                <span className="text-base">{goal.icon}</span>
-                <span className="text-sm font-semibold text-neutral-800">{goal.name}</span>
-              </div>
-              <div className="mb-1 flex items-center justify-between text-neutral-600">
-                <span>${goal.current_amount.toLocaleString()} / ${goal.target_amount.toLocaleString()}</span>
-                <span className="text-neutral-500">{goal.deadline}</span>
-              </div>
-              <div className="h-1.5 w-full overflow-hidden rounded-full bg-white">
-                <div className="h-full rounded-full bg-gradient-to-r from-emerald-500 to-sky-400" style={{ width: `${pct}%` }} />
-              </div>
-            </article>
-          );
-        })}
-      </div>
+      {goals.length === 0 ? (
+        <div className="rounded-xl border border-dashed border-slate-300 bg-slate-50 px-4 py-5 text-sm text-neutral-500">
+          Set your first family goal (vacation, emergency fund, debt payoff) so recommendations and dashboards prioritize it.
+        </div>
+      ) : (
+        <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
+          {goals.map((goal) => {
+            const pct = goal.target_amount > 0
+              ? Math.min(100, Math.round((goal.current_amount / goal.target_amount) * 100))
+              : 0;
+            return (
+              <article key={goal.id} className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5 text-xs">
+                <div className="mb-1.5 flex items-center gap-2">
+                  <span className="text-base">{goal.icon}</span>
+                  <span className="text-sm font-semibold text-neutral-800">{goal.name}</span>
+                </div>
+                <div className="mb-1 flex items-center justify-between text-neutral-600">
+                  <span>${goal.current_amount.toLocaleString()} / ${goal.target_amount.toLocaleString()}</span>
+                  <span className="text-neutral-500">{goal.deadline}</span>
+                </div>
+                <div className="h-1.5 w-full overflow-hidden rounded-full bg-white">
+                  <div className="h-full rounded-full bg-gradient-to-r from-emerald-500 to-sky-400" style={{ width: `${pct}%` }} />
+                </div>
+              </article>
+            );
+          })}
+        </div>
+      )}
+
     </section>
+  );
+}
+
+function ManageGoalsDrawer(props: {
+  open: boolean;
+  goals: Goal[];
+  onClose: () => void;
+  onSaved: () => Promise<void> | void;
+}) {
+  const { open, goals, onClose, onSaved } = props;
+  const [saving, setSaving] = useState(false);
+  const [draft, setDraft] = useState({
+    name: "",
+    icon: "🎯",
+    target_amount: "",
+    current_amount: "0",
+    deadline: new Date(Date.now() + 90 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10),
+    priority: "medium",
+  });
+
+  const handleCreateGoal = async () => {
+    if (!draft.name.trim() || !draft.target_amount) return;
+    setSaving(true);
+    try {
+      await api.createGoal({
+        name: draft.name.trim(),
+        icon: draft.icon || "🎯",
+        target_amount: Number(draft.target_amount),
+        current_amount: Number(draft.current_amount || 0),
+        deadline: draft.deadline,
+        priority: draft.priority,
+        status: "active",
+      });
+      await onSaved();
+      setDraft({
+        name: "",
+        icon: "🎯",
+        target_amount: "",
+        current_amount: "0",
+        deadline: new Date(Date.now() + 90 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10),
+        priority: "medium",
+      });
+    } catch {
+      /* noop */
+    }
+    setSaving(false);
+  };
+
+  return (
+    <div
+      className={`fixed inset-y-0 right-0 z-50 flex w-[380px] flex-col border-l border-slate-200 bg-white shadow-2xl transition-transform duration-300 ${open ? "translate-x-0" : "translate-x-full"}`}
+    >
+      <div className="flex items-center justify-between border-b border-slate-200 px-4 py-3">
+        <div>
+          <h3 className="text-sm font-semibold text-neutral-800">Edit goals</h3>
+          <p className="text-[0.65rem] text-neutral-400">{goals.length} goal{goals.length !== 1 ? "s" : ""}</p>
+        </div>
+        <button onClick={onClose} className="rounded-full p-1 text-neutral-400 hover:bg-slate-100 hover:text-neutral-600">✕</button>
+      </div>
+      <div className="flex-1 overflow-auto px-4 py-4 space-y-4">
+        {goals.length > 0 && (
+          <div className="space-y-2">
+            {goals.map((g) => (
+              <div key={g.id} className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
+                <p className="text-xs font-semibold text-neutral-800">{g.icon} {g.name}</p>
+                <p className="text-[0.65rem] text-neutral-500">${g.current_amount.toLocaleString()} / ${g.target_amount.toLocaleString()} by {fmtDate(g.deadline)}</p>
+              </div>
+            ))}
+          </div>
+        )}
+        <div className="rounded-xl border border-slate-200 p-3 space-y-2">
+          <p className="text-xs font-semibold uppercase tracking-wide text-neutral-500">Add goal</p>
+          <div className="grid grid-cols-1 gap-2">
+            <input value={draft.name} onChange={(e) => setDraft((d) => ({ ...d, name: e.target.value }))} placeholder="Goal name" className="rounded-lg border border-slate-200 px-2.5 py-1.5 text-sm" />
+            <div className="grid grid-cols-2 gap-2">
+              <input value={draft.icon} onChange={(e) => setDraft((d) => ({ ...d, icon: e.target.value }))} placeholder="Icon" className="rounded-lg border border-slate-200 px-2.5 py-1.5 text-sm" />
+              <select value={draft.priority} onChange={(e) => setDraft((d) => ({ ...d, priority: e.target.value }))} className="rounded-lg border border-slate-200 px-2.5 py-1.5 text-sm">
+                <option value="high">High</option>
+                <option value="medium">Medium</option>
+                <option value="low">Low</option>
+              </select>
+            </div>
+            <div className="grid grid-cols-2 gap-2">
+              <input type="number" value={draft.target_amount} onChange={(e) => setDraft((d) => ({ ...d, target_amount: e.target.value }))} placeholder="Target amount" className="rounded-lg border border-slate-200 px-2.5 py-1.5 text-sm" />
+              <input type="number" value={draft.current_amount} onChange={(e) => setDraft((d) => ({ ...d, current_amount: e.target.value }))} placeholder="Current amount" className="rounded-lg border border-slate-200 px-2.5 py-1.5 text-sm" />
+            </div>
+            <input type="date" value={draft.deadline} onChange={(e) => setDraft((d) => ({ ...d, deadline: e.target.value }))} className="rounded-lg border border-slate-200 px-2.5 py-1.5 text-sm" />
+          </div>
+          <div className="flex justify-end">
+            <button onClick={handleCreateGoal} disabled={saving || !draft.name.trim() || !draft.target_amount} className="rounded-lg bg-neutral-900 px-3 py-1.5 text-xs font-medium text-white disabled:opacity-50">
+              {saving ? "Saving..." : "Create goal"}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
   );
 }
 
@@ -916,6 +1033,7 @@ function GoalsStrip({ goals }: { goals: Goal[] }) {
 
 function TimelineTable(props: {
   items: Transaction[];
+  allTransactions: Transaction[];
   pendingProposals: TransactionProposal[];
   viewMode: TimelineViewMode;
   dateRange: DateRange;
@@ -924,9 +1042,11 @@ function TimelineTable(props: {
   onSelect: (item: Transaction) => void;
   onApproveProposal: (proposalId: number) => void;
   onRejectProposal: (proposalId: number) => void;
+  onQuickAddTransaction: () => Promise<void> | void;
 }) {
   const {
     items,
+    allTransactions,
     pendingProposals,
     viewMode,
     dateRange,
@@ -935,7 +1055,18 @@ function TimelineTable(props: {
     onSelect,
     onApproveProposal,
     onRejectProposal,
+    onQuickAddTransaction,
   } = props;
+  const [quickAddOpen, setQuickAddOpen] = useState(false);
+  const [quickSaving, setQuickSaving] = useState(false);
+  const [quickDraft, setQuickDraft] = useState({
+    description: "",
+    amount: "",
+    owner: "Household",
+    date: new Date().toISOString().slice(0, 10),
+    category: "",
+    tags: "",
+  });
 
   const groupedByTag = useMemo(() => {
     const map = new Map<string, Transaction[]>();
@@ -956,6 +1087,52 @@ function TimelineTable(props: {
     }
     return Array.from(map.entries());
   }, [items]);
+
+  const suggestion = useMemo(
+    () => suggestTransactionFromHistory(quickDraft.description, allTransactions),
+    [quickDraft.description, allTransactions]
+  );
+
+  const applySuggestion = () => {
+    if (!suggestion) return;
+    setQuickDraft((prev) => ({
+      ...prev,
+      owner: suggestion.owner || prev.owner,
+      category: suggestion.category || prev.category,
+      tags: suggestion.tags.join(", "),
+    }));
+  };
+
+  const saveQuickTransaction = async () => {
+    if (!quickDraft.description.trim() || !quickDraft.amount) return;
+    setQuickSaving(true);
+    try {
+      await api.createTransaction({
+        description: quickDraft.description.trim(),
+        amount: Number(quickDraft.amount),
+        owner: quickDraft.owner.trim() || "Household",
+        date: quickDraft.date,
+        category: quickDraft.category.trim() || null,
+        tags: quickDraft.tags
+          .split(",")
+          .map((t) => t.trim())
+          .filter(Boolean),
+      });
+      await onQuickAddTransaction();
+      setQuickAddOpen(false);
+      setQuickDraft({
+        description: "",
+        amount: "",
+        owner: "Household",
+        date: new Date().toISOString().slice(0, 10),
+        category: "",
+        tags: "",
+      });
+    } catch {
+      /* noop */
+    }
+    setQuickSaving(false);
+  };
 
   const Row = ({ item }: { item: Transaction }) => (
     <tr key={item.id} className="cursor-pointer border-t border-slate-100 hover:bg-sky-50/40 transition-colors" onClick={() => onSelect(item)}>
@@ -982,10 +1159,49 @@ function TimelineTable(props: {
           <p className="text-sm text-neutral-500">All transactions from the API, grouped and filterable.</p>
         </div>
         <div className="flex flex-col items-end gap-1">
+          <button
+            onClick={() => setQuickAddOpen(true)}
+            className="rounded-lg border border-slate-200 bg-white px-2.5 py-1 text-xs font-medium text-neutral-700 hover:bg-slate-50"
+          >
+            + Quick add
+          </button>
           <ChipGroup label="View" options={[["list","List"],["byTag","By tag"],["byOwner","By owner"]]} value={viewMode} onChange={(v) => onChangeViewMode(v as TimelineViewMode)} />
           <ChipGroup label="Range" options={[["this-month","Month"],["last-30","30 days"],["this-year","Year"],["all-time","All"]]} value={dateRange} onChange={(v) => onChangeDateRange(v as DateRange)} />
         </div>
       </div>
+      {quickAddOpen && (
+        <div className="border-b border-slate-200 bg-slate-50 px-4 py-3 space-y-2">
+          <div className="flex items-center justify-between">
+            <p className="text-xs font-semibold uppercase tracking-wide text-neutral-500">Quick add transaction</p>
+            {suggestion && (
+              <button onClick={applySuggestion} className="rounded-full border border-sky-200 bg-sky-50 px-2.5 py-0.5 text-[0.65rem] font-medium text-sky-700 hover:bg-sky-100">
+                Apply AI suggestion
+              </button>
+            )}
+          </div>
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
+            <input value={quickDraft.description} onChange={(e) => setQuickDraft((d) => ({ ...d, description: e.target.value }))} placeholder="Description" className="rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-sm" />
+            <input type="number" value={quickDraft.amount} onChange={(e) => setQuickDraft((d) => ({ ...d, amount: e.target.value }))} placeholder="Amount" className="rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-sm" />
+            <input value={quickDraft.owner} onChange={(e) => setQuickDraft((d) => ({ ...d, owner: e.target.value }))} placeholder="Owner" className="rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-sm" />
+            <input type="date" value={quickDraft.date} onChange={(e) => setQuickDraft((d) => ({ ...d, date: e.target.value }))} className="rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-sm" />
+            <input value={quickDraft.category} onChange={(e) => setQuickDraft((d) => ({ ...d, category: e.target.value }))} placeholder="Category" className="rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-sm" />
+            <input value={quickDraft.tags} onChange={(e) => setQuickDraft((d) => ({ ...d, tags: e.target.value }))} placeholder="Tags (comma-separated)" className="rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-sm" />
+          </div>
+          {suggestion && (
+            <p className="text-[0.7rem] text-neutral-500">
+              Suggested from {suggestion.basedOn} similar transactions: owner <span className="font-medium text-neutral-700">{suggestion.owner}</span>,
+              {" "}category <span className="font-medium text-neutral-700">{suggestion.category || "Uncategorized"}</span>,
+              {" "}tags {suggestion.tags.length ? suggestion.tags.map((t) => `#${t}`).join(", ") : "none"}.
+            </p>
+          )}
+          <div className="flex justify-end gap-2">
+            <button onClick={() => setQuickAddOpen(false)} className="rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs text-neutral-600">Cancel</button>
+            <button onClick={saveQuickTransaction} disabled={quickSaving || !quickDraft.description.trim() || !quickDraft.amount} className="rounded-lg bg-neutral-900 px-3 py-1.5 text-xs font-medium text-white disabled:opacity-50">
+              {quickSaving ? "Saving..." : "Save transaction"}
+            </button>
+          </div>
+        </div>
+      )}
       {pendingProposals.length > 0 && (
         <div className="border-b border-slate-200 bg-gradient-to-r from-amber-50 via-rose-50 to-sky-50 px-4 py-3">
           <div className="mb-2 flex items-center justify-between">
@@ -1326,4 +1542,60 @@ function categoryEmoji(category: string | null) {
   if (c.includes("entertain")) return "🎬";
   if (c.includes("education")) return "📚";
   return "💸";
+}
+
+function suggestTransactionFromHistory(description: string, history: Transaction[]) {
+  const query = description.toLowerCase().trim();
+  if (!query || history.length === 0) return null;
+
+  const tokens = new Set(
+    query
+      .split(/[^a-z0-9]+/)
+      .map((t) => t.trim())
+      .filter((t) => t.length >= 3)
+  );
+  if (tokens.size === 0) return null;
+
+  const scored = history
+    .map((txn) => {
+      const desc = (txn.description || "").toLowerCase();
+      let score = 0;
+      for (const token of tokens) {
+        if (desc.includes(token)) score += 1;
+      }
+      return { txn, score };
+    })
+    .filter((x) => x.score > 0)
+    .sort((a, b) => b.score - a.score)
+    .slice(0, 12);
+
+  if (scored.length === 0) return null;
+
+  const categoryCounts: Record<string, number> = {};
+  const ownerCounts: Record<string, number> = {};
+  const tagCounts: Record<string, number> = {};
+
+  for (const { txn, score } of scored) {
+    const weight = Math.max(1, score);
+    const category = txn.category || "Uncategorized";
+    categoryCounts[category] = (categoryCounts[category] || 0) + weight;
+    ownerCounts[txn.owner] = (ownerCounts[txn.owner] || 0) + weight;
+    for (const tag of txn.tags || []) {
+      tagCounts[tag] = (tagCounts[tag] || 0) + weight;
+    }
+  }
+
+  const bestCategory = Object.entries(categoryCounts).sort((a, b) => b[1] - a[1])[0]?.[0] || "Uncategorized";
+  const bestOwner = Object.entries(ownerCounts).sort((a, b) => b[1] - a[1])[0]?.[0] || "Household";
+  const tags = Object.entries(tagCounts)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 3)
+    .map(([tag]) => tag);
+
+  return {
+    owner: bestOwner,
+    category: bestCategory === "Uncategorized" ? "" : bestCategory,
+    tags,
+    basedOn: scored.length,
+  };
 }

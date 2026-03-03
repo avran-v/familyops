@@ -67,8 +67,6 @@ DEMO_TRANSACTIONS = [
 DEMO_GOALS = [
     {"name": "Summer trip fund", "icon": "🛫", "target_amount": 3000, "current_amount": 1800, "deadline": "2026-07-01", "priority": "high", "status": "active", "summary": "Family vacation savings — AI tracks how choices affect the timeline."},
     {"name": "Emergency cushion", "icon": "🛟", "target_amount": 5000, "current_amount": 2600, "deadline": "2026-12-31", "priority": "high", "status": "active", "summary": "Safety net that grows over time through small, consistent decisions."},
-    {"name": "Mia & Sam allowance pot", "icon": "🎨", "target_amount": 600, "current_amount": 220, "deadline": "2026-06-15", "priority": "medium", "status": "active", "summary": "Teaching money skills through a shared family pot."},
-    {"name": "Laptop upgrade (finished)", "icon": "💻", "target_amount": 1200, "current_amount": 1200, "deadline": "2025-11-01", "priority": "low", "status": "archived", "summary": "Completed goal — saved up by trimming subscriptions and small cuts."},
 ]
 
 DEMO_RECOMMENDATIONS = [

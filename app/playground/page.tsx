@@ -55,6 +55,7 @@ export default function PlaygroundPage() {
   const [suggestionsLoading, setSuggestionsLoading] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+  const didLoadSuggestions = useRef(false);
 
   const loadSuggestions = useCallback(async () => {
     setSuggestionsLoading(true);
@@ -75,6 +76,8 @@ export default function PlaygroundPage() {
   }, []);
 
   useEffect(() => {
+    if (didLoadSuggestions.current) return;
+    didLoadSuggestions.current = true;
     loadSuggestions();
   }, [loadSuggestions]);
 
